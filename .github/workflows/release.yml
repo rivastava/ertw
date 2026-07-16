@@ -23,7 +23,7 @@ jobs:
             binary: target/release/ertw.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux native dependencies
         if: runner.os == 'Linux'
