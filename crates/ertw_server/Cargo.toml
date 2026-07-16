@@ -1,0 +1,21 @@
+[package]
+name = "ertw_server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Non-blocking framed TCP bridge for ERTW agents"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ertw_interface = { workspace = true }
+ertw_core = { workspace = true }
+bevy = { workspace = true, default-features = false, features = ["std"] }
+
+[[bin]]
+name = "ertw-server"
+path = "src/bin/ertw-server.rs"

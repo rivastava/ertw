@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible ERTW defect
+body:
+  - type: textarea
+    attributes:
+      label: Reproduction
+      description: Include seed, platform, command, and minimal steps.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected invariant
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Actual result
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Commit or version
+    validations:
+      required: true

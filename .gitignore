@@ -1,0 +1,24 @@
+# Rust build output
+/target/
+
+# Internal project material
+/AGENTS.md
+/docs/PLAN.md
+/brief/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+# Editors and local tooling
+.idea/
+.vscode/
+.commandcode/

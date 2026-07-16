@@ -1,0 +1,15 @@
+[package]
+name = "ertw_interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Architecture-neutral observation and action contract for ERTW"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []

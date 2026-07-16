@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ertw_interface",
+    "crates/ertw_core",
+    "crates/ertw_render",
+    "crates/ertw_server",
+    "crates/ertw_evaluator",
+    "agents/random_policy",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["ERTW contributors"]
+repository = "https://github.com/rivastava/ertw"
+homepage = "https://github.com/rivastava/ertw"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+bevy = { version = "0.19", default-features = false }
+avian2d = { version = "0.7", default-features = false, features = ["2d", "f32", "parry-f32", "parallel", "enhanced-determinism", "bevy_diagnostic"] }
+noise = "0.9"
+rand = "0.8"
+rand_chacha = "0.3"
+
+ertw_interface = { path = "crates/ertw_interface" }
+ertw_core = { path = "crates/ertw_core" }
+ertw_render = { path = "crates/ertw_render" }
+ertw_server = { path = "crates/ertw_server" }
+
+# Faster iterative compiles for dependencies while keeping our own code debuggable.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

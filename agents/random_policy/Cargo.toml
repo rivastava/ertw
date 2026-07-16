@@ -1,0 +1,19 @@
+[package]
+name = "random_policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reference bounded random controller for ERTW"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ertw_interface = { workspace = true }
+rand = { workspace = true }
+
+[features]
+default = []

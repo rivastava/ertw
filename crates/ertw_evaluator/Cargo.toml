@@ -1,0 +1,23 @@
+[package]
+name = "ertw_evaluator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline historical competence evaluation for ERTW"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+ertw_core = { workspace = true }
+ertw_interface = { workspace = true }
+
+[dev-dependencies]
+random_policy = { path = "../../agents/random_policy" }
+bevy = { workspace = true, default-features = false, features = ["std"] }
+
+[features]
+default = []

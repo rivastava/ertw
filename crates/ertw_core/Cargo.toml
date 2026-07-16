@@ -1,0 +1,36 @@
+[package]
+name = "ertw_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic zero-reward physics substrate for ERTW"
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bevy = { workspace = true, default-features = false, features = [
+    "std",
+    "bevy_log",
+    "reflect_auto_register",
+    "multi_threaded",
+    "debug",
+] }
+avian2d = { workspace = true }
+noise = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+ertw_interface = { workspace = true }
+
+[dev-dependencies]
+random_policy = { path = "../../agents/random_policy" }
+
+[features]
+default = []
+
+[[bench]]
+name = "simulation"
+harness = false
