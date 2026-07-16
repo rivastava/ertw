@@ -24,7 +24,7 @@ unsafe_code = "forbid"
 bevy = { version = "0.19", default-features = false }
 avian2d = { version = "0.7", default-features = false, features = ["2d", "f32", "parry-f32", "parallel", "enhanced-determinism", "bevy_diagnostic"] }
 noise = "0.9"
-rand = "0.8"
+rand = "0.10"
 rand_chacha = "0.3"
 
 ertw_interface = { path = "crates/ertw_interface" }
