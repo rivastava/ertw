@@ -126,10 +126,16 @@ Silicon measured approximately 38k, 23k, and 34k agent-steps/s at 32, 64, and
 128 agents respectively. These are local smoke measurements, not portable
 performance guarantees; geometry and physics contacts materially affect them.
 
+## Releases
+
+Tagged releases publish the native observer and lockstep server for Linux
+x86-64, macOS Apple Silicon, and Windows x86-64, together with SHA-256
+checksums. Download them from the
+[GitHub releases page](https://github.com/rivastava/ertw/releases).
+
 ## Research-preview limitations
 
-- Public cross-platform CI and release workflows are present but do not have a
-  published run history yet.
+- The protected CI gate is validated on Linux, macOS, and Windows.
 - Large-population throughput still needs profiler traces and repeatable
   multi-machine baselines; the included harness is a scale smoke test.
 - The evaluator is an initial lexicographic comparison, not a validated general
