@@ -4,7 +4,7 @@
 //! Thermal Vents, Kinetic Harvesting, or Consumption of failed structures. Every
 //! action also costs energy. At zero energy a node dies.
 
-use crate::components::{Conductivity, EnergyLedger, Physical, Tags};
+use crate::components::{Conductivity, DeadNode, EnergyFlow, EnergyLedger, Physical, Tags, Yield};
 use crate::fields::FieldSampler;
 use crate::fragmentation::FragmentQueue;
 use crate::spatial_hash::SpatialHash;
@@ -34,31 +34,35 @@ pub const VOLATILE_TRAP_RANGE: f32 = 8.0;
 /// Fraction of a volatile trap's stored energy released per spike event.
 pub const VOLATILE_TRAP_DRAIN_FRACTION: f32 = 0.5;
 
-/// Search radius for the killer-attribution heuristic when a node's structure
-/// reaches zero (spec item 5: consumption transfer).
-pub const KILLER_SEARCH_RADIUS: f32 = 10.0;
+#[derive(Resource, Default)]
+pub struct DeathQueue {
+    entities: Vec<Entity>,
+}
 
-/// Apply continuous thermodynamic decay + field-driven drain to every node, and
-/// despawn nodes that die. Runs in `FixedUpdate`.
-#[allow(clippy::too_many_arguments)]
+/// Apply continuous thermodynamic decay + field-driven drain to every node and
+/// queue depleted nodes for a post-physics lifecycle transition.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn thermodynamic_drain(
     sampler: Res<FieldSampler>,
     spatial: Res<SpatialHash>,
-    mut query: Query<(
-        Entity,
-        &Transform,
-        &Conductivity,
-        &Tags,
-        &mut Physical,
-        &mut EnergyLedger,
-    )>,
+    mut query: Query<
+        (
+            Entity,
+            &Transform,
+            &Conductivity,
+            &Tags,
+            &Yield,
+            &mut Physical,
+            &mut EnergyLedger,
+        ),
+        Without<DeadNode>,
+    >,
     transforms: Query<(Entity, &Transform)>,
     tags_query: Query<&Tags>,
-    mut commands: Commands,
     mut fragments: ResMut<FragmentQueue>,
+    mut deaths: ResMut<DeathQueue>,
 ) {
-    let mut dead: Vec<Entity> = Vec::new();
-    for (entity, tf, cond, tags, mut phys, mut ledger) in query.iter_mut() {
+    for (entity, tf, cond, tags, yield_threshold, mut phys, mut ledger) in query.iter_mut() {
         let position = tf.translation.truncate();
         let f = sampler.sample(position);
         // Thermal exposure raises drain, scaled by conductivity. Low-conductivity
@@ -72,39 +76,56 @@ pub fn thermodynamic_drain(
         // over-exposure (spec item 5).
         if tags.0.has(CustomTags::THERMAL_VENT) {
             let gain = 2.0 * thermal_load;
-            phys.energy += gain * FIXED_DT;
-            ledger.vented += gain * FIXED_DT;
+            ledger.credit(&mut phys, EnergyFlow::Vented, gain * FIXED_DT);
             phys.structure -= 0.3 * thermal_load * FIXED_DT;
         }
 
-        phys.energy -= drain * FIXED_DT;
-        ledger.dissipated += drain * FIXED_DT;
+        ledger.drain(&mut phys, drain * FIXED_DT);
 
-        if phys.structure <= 0.0 && phys.energy > 0.0 {
-            // Structural failure: fragment into daughters (spec item 6) rather
-            // than vanish. Attribute the killing blow so consumption transfer
-            // (spec item 5) can route the victim's energy to the attacker.
-            let killer = find_killer(
-                entity,
-                tf.translation.truncate(),
-                &spatial,
-                &transforms,
-                &tags_query,
-            );
-            // Pre-compute the consumption share (half the victim's current
-            // energy) so the transfer system doesn't need its own read query.
-            let share = if killer.is_some() {
-                phys.energy * 0.5
-            } else {
-                0.0
-            };
-            crate::fragmentation::queue_fragment_with_share(entity, killer, share, &mut fragments);
-        } else if phys.energy <= 0.0 {
-            dead.push(entity);
+        if phys.structure <= 0.0
+            && phys.energy > 0.0
+            && crate::fragmentation::can_fragment(&phys, *yield_threshold)
+        {
+            // Ambient structural failure has no attacker. Collision-induced
+            // failure is queued separately from the actual contact impulse.
+            crate::fragmentation::queue_fragment(entity, None, &mut fragments);
+        } else if phys.energy <= 0.0 && !deaths.entities.contains(&entity) {
+            deaths.entities.push(entity);
         }
     }
-    for e in dead {
-        commands.entity(e).despawn();
+}
+
+/// End depleted agent/controller identity while retaining inert physical matter.
+pub fn run_deaths(world: &mut World) {
+    let queued = std::mem::take(&mut world.resource_mut::<DeathQueue>().entities);
+    for entity in queued {
+        if world.get_entity(entity).is_err() {
+            continue;
+        }
+        let mut joint_query = world.query::<(Entity, &crate::components::ClampJoint)>();
+        let joints = joint_query
+            .iter(world)
+            .filter_map(|(joint_entity, joint)| {
+                (joint.owner == entity || joint.target == entity).then_some(joint_entity)
+            })
+            .collect::<Vec<_>>();
+        for joint in joints {
+            world.despawn(joint);
+        }
+        if let Some(mut tags) = world.get_mut::<Tags>(entity) {
+            tags.0 = tags
+                .0
+                .without(CustomTags::AGENT)
+                .without(CustomTags::CLAMP_CAPABLE);
+        }
+        world
+            .entity_mut(entity)
+            .remove::<crate::components::AgentMarker>()
+            .remove::<crate::components::AgentTuning>()
+            .remove::<crate::components::ClampState>()
+            .remove::<crate::components::FabricateCooldown>()
+            .remove::<crate::components::ReproductionState>()
+            .insert(DeadNode);
     }
 }
 
@@ -137,47 +158,6 @@ fn shelter_exposure_factor(
     } else {
         1.0
     }
-}
-
-/// Best-effort killer attribution for spec item 5 (consumption transfer).
-///
-/// Heuristic: among AGENT-tagged neighbors within `KILLER_SEARCH_RADIUS`, pick
-/// the closest one. A perfect "whichever node dealt the finishing blow"
-/// attribution would require a per-impulse damage log per pair; this
-/// approximation matches the spec intent for a continuous-physics world
-/// (the agent transferring momentum is also the one in contact) without
-/// expanding the ECS surface.
-///
-/// Returns `None` when no candidate agent is in range; in that case the
-/// victim's energy stays with its daughters when it fragments.
-pub fn find_killer(
-    victim: Entity,
-    victim_pos: Vec2,
-    spatial: &SpatialHash,
-    transforms: &Query<(Entity, &Transform)>,
-    tags: &Query<&Tags>,
-) -> Option<Entity> {
-    let mut near: Vec<Entity> = Vec::new();
-    spatial.query_radius(victim_pos, KILLER_SEARCH_RADIUS, &mut near);
-    let mut best: Option<(Entity, f32)> = None;
-    for other in near {
-        if other == victim {
-            continue;
-        }
-        let Ok((_oe, tf)) = transforms.get(other) else {
-            continue;
-        };
-        let Ok(t) = tags.get(other) else { continue };
-        if !t.0.has(CustomTags::AGENT) {
-            continue;
-        }
-        let d2 = tf.translation.truncate().distance_squared(victim_pos);
-        match best {
-            Some((_, bd)) if d2 >= bd => {}
-            _ => best = Some((other, d2)),
-        }
-    }
-    best.map(|(e, _)| e)
 }
 
 /// Kinetic Harvesting (spec item 5): agents in sustained relative motion
@@ -252,21 +232,20 @@ pub fn kinetic_harvest(
             }
             // Two independent, scope-limited mutations. Each `get_mut` borrow
             // is dropped at the end of its block before the next is taken.
-            if let Ok(mut node_phys) = physicals.get_mut(other) {
-                node_phys.energy -= transfer;
+            let debited = if let (Ok(mut node_phys), Ok(mut node_ledger)) =
+                (physicals.get_mut(other), ledgers.get_mut(other))
+            {
+                node_ledger.debit_available(&mut node_phys, EnergyFlow::Transferred, transfer)
             } else {
+                0.0
+            };
+            if debited <= 0.0 {
                 continue;
             }
-            if let Ok(mut agent_phys) = physicals.get_mut(agent_e) {
-                agent_phys.energy += transfer;
-            } else {
-                continue;
-            }
-            if let Ok(mut agent_ledger) = ledgers.get_mut(agent_e) {
-                agent_ledger.harvested += transfer;
-            }
-            if let Ok(mut node_ledger) = ledgers.get_mut(other) {
-                node_ledger.transferred_out += transfer;
+            if let (Ok(mut agent_phys), Ok(mut agent_ledger)) =
+                (physicals.get_mut(agent_e), ledgers.get_mut(agent_e))
+            {
+                agent_ledger.credit(&mut agent_phys, EnergyFlow::Harvested, debited);
             }
         }
     }
@@ -329,37 +308,30 @@ pub fn volatile_trap_discharge(
         if total_w <= 0.0 {
             continue;
         }
-        let Ok(mut trap_phys) = physicals.get_mut(trap) else {
-            continue;
-        };
-        let release = trap_phys.energy.max(0.0) * VOLATILE_TRAP_DRAIN_FRACTION;
+        let release = physicals
+            .get(trap)
+            .map(|physical| physical.energy.max(0.0) * VOLATILE_TRAP_DRAIN_FRACTION)
+            .unwrap_or(0.0);
         if release <= 0.0 {
             continue;
         }
-        trap_phys.energy -= release;
-        if let Ok(mut ledger) = ledgers.get_mut(trap) {
-            ledger.transferred_out += release;
-        }
+        let released = if let (Ok(mut trap_phys), Ok(mut ledger)) =
+            (physicals.get_mut(trap), ledgers.get_mut(trap))
+        {
+            ledger.debit_available(&mut trap_phys, EnergyFlow::Transferred, release)
+        } else {
+            0.0
+        };
 
         for (target, w) in weights {
-            let share = release * (w / total_w);
-            if let Ok(mut p) = physicals.get_mut(target) {
-                p.energy += share;
-            }
-            if let Ok(mut l) = ledgers.get_mut(target) {
-                l.harvested += share;
+            let share = released * (w / total_w);
+            if let (Ok(mut physical), Ok(mut ledger)) =
+                (physicals.get_mut(target), ledgers.get_mut(target))
+            {
+                ledger.credit(&mut physical, EnergyFlow::Harvested, share);
             }
         }
     }
-}
-
-/// Consumption transfer: move a share of `victim`'s remaining energy to `attacker`.
-/// Used by the Consumption channel (spec item 5) when a node's structure fails
-/// below its threshold due to another node's finishing blow.
-pub fn transfer_energy(victim: &mut Physical, attacker: &mut Physical) {
-    let share = victim.energy * 0.5;
-    victim.energy -= share;
-    attacker.energy += share;
 }
 
 #[cfg(test)]
@@ -397,90 +369,6 @@ mod tests {
     /// without forcing every test node to carry one.
     #[derive(Component)]
     struct ImpulseAccumStub;
-
-    /// `find_killer` must prefer the closest AGENT-tagged neighbor and ignore
-    /// non-agents entirely.
-    #[test]
-    fn find_killer_picks_nearest_agent_and_ignores_non_agents() {
-        let mut world = World::new();
-        world.insert_resource(SpatialHash::default());
-        // Spawn a victim at the origin.
-        let victim = spawn_ecs_node(&mut world, Vec2::ZERO, 0, 5.0, 5.0, 1.0, 0.6);
-        // Non-agent (just inert) close to victim: must NOT be picked.
-        let _non_agent = spawn_ecs_node(&mut world, Vec2::new(1.0, 0.0), 0, 5.0, 5.0, 1.0, 0.6);
-        // Agent further away: should be picked (only candidate).
-        let far_agent = spawn_ecs_node(
-            &mut world,
-            Vec2::new(3.0, 0.0),
-            CustomTags::AGENT,
-            5.0,
-            5.0,
-            1.0,
-            0.6,
-        );
-
-        // Rebuild spatial hash from transforms. Move the resource out
-        // briefly so we can mutate `world` while accessing it.
-        let mut h = world.remove_resource::<SpatialHash>();
-        if let Some(ref mut h) = h {
-            h.rebuild_from_state(&mut world);
-        }
-        world.insert_resource(h.unwrap_or_default());
-
-        // Replicate find_killer's neighbor loop directly using QueryState
-        // (the public `find_killer` is only callable from inside a system
-        // where `Query` is in scope).
-        let mut near: Vec<bevy::prelude::Entity> = Vec::new();
-        {
-            let h = world.resource::<SpatialHash>();
-            h.query_radius(Vec2::ZERO, KILLER_SEARCH_RADIUS, &mut near);
-        }
-        let mut transforms = world.query::<(Entity, &Transform)>();
-        let mut tags = world.query::<&Tags>();
-        let mut best: Option<(bevy::prelude::Entity, f32)> = None;
-        for other in near {
-            if other == victim {
-                continue;
-            }
-            let Ok((_oe, tf)) = transforms.get(&world, other) else {
-                continue;
-            };
-            let Ok(t) = tags.get(&world, other) else {
-                continue;
-            };
-            if !t.0.has(CustomTags::AGENT) {
-                continue;
-            }
-            let d2 = tf.translation.truncate().distance_squared(Vec2::ZERO);
-            match best {
-                Some((_, bd)) if d2 >= bd => {}
-                _ => best = Some((other, d2)),
-            }
-        }
-        let killer = best.map(|(e, _)| e);
-        assert_eq!(killer, Some(far_agent));
-
-        let _ = world.entity(far_agent); // keep the entity id binding live
-    }
-
-    /// `transfer_energy` must move half of the victim's energy to the attacker
-    /// and leave the victim with the other half (spec item 5).
-    #[test]
-    fn transfer_energy_splits_victim_energy_with_attacker() {
-        let mut v = Physical {
-            mass: 1.0,
-            structure: 5.0,
-            energy: 10.0,
-        };
-        let mut a = Physical {
-            mass: 1.0,
-            structure: 5.0,
-            energy: 0.0,
-        };
-        transfer_energy(&mut v, &mut a);
-        assert_eq!(v.energy, 5.0);
-        assert_eq!(a.energy, 5.0);
-    }
 
     /// A node with the `ENERGY_CONVERTIBLE` tag must transfer energy to a
     /// nearby moving agent; without motion the channel must remain inactive.
@@ -566,6 +454,7 @@ mod tests {
         crate::genesis::spawn_genesis_node(
             &mut sheltered.app().world_mut().commands(),
             crate::genesis::TerrainSpawn {
+                chunk_origin: crate::components::ChunkOrigin { x: 0, y: 0 },
                 pos: Vec2::new(1.0, 0.0),
                 node_rng: 7,
                 kind: crate::genesis::TerrainKind::Shelter,

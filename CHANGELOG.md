@@ -19,5 +19,20 @@ public versions are tagged.
 - Added historical dead-agent outcomes to external evaluation.
 - Introduced protocol v3 with lossless tags, full identifiers, framed messages,
   egocentric observations, field gradients, and non-blocking remote I/O.
+- Added protocol v4 lockstep metadata, configurable action hold, generic
+  lifecycle events, session resume, optional physical deltas, stable public
+  identities, and canonical hashed world snapshots.
+- Upgraded snapshots to schema v2 with active clamp relationship restoration.
+- Replaced proximity-based consumption credit with causal contact attribution.
+- Centralized production energy mutations through auditable ledger
+  transactions and added randomized conservation properties.
+- Prevented undersized fragmentation from creating mass through daughter
+  minimums and added explicit orphan-joint cleanup.
+- Made thermodynamic death an inert-matter transition, avoiding unsafe collider
+  deletion while preserving physical consequence until chunk reclamation.
+- Reduced observation hot-path allocation and sorting work and excluded
+  observer-only entities from the spatial index.
+- Randomized transport session identities and resume tokens independently of
+  the deterministic simulation seed.
 - Added the `ertw-server` executable for fixed-rate external-agent integration
   and validated it end-to-end with an independently sourced Python NEAT agent.

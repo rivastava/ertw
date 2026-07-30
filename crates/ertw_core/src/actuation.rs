@@ -15,7 +15,9 @@
 //! The world interprets and bounds every actuator; the agent only ever emits
 //! continuous tensor values.
 
-use crate::components::{ClampState, FabricateCooldown, NodeRng, Oscillator, Physical, Tags};
+use crate::components::{
+    ClampJoint, ClampState, EnergyFlow, FabricateCooldown, NodeRng, Oscillator, Physical, Tags,
+};
 use crate::spatial_hash::SpatialHash;
 use crate::tags::CustomTags;
 use crate::PendingActions;
@@ -34,6 +36,55 @@ pub const FABRICATE_MASS_COST: f32 = 0.5;
 pub const FABRICATE_COOLDOWN: f32 = 3.0;
 /// How quickly the commanded oscillator value is approached (per second).
 pub const OSC_RESPONSE: f32 = 4.0;
+
+/// Queue joint entities before queueing their physical endpoints for despawn.
+/// Avian relationship hooks require this ordering within one command buffer.
+pub fn despawn_physical_entities(
+    commands: &mut Commands,
+    entities: &[Entity],
+    joints: &Query<(Entity, &ClampJoint)>,
+) {
+    for (joint_entity, joint) in joints.iter() {
+        if entities.contains(&joint.owner) || entities.contains(&joint.target) {
+            commands.entity(joint_entity).despawn();
+        }
+    }
+    for entity in entities {
+        commands.entity(*entity).despawn();
+    }
+}
+
+/// Remove orphaned joint entities and reset clamp state after either endpoint
+/// disappears. This runs every simulation tick independently of agent actions.
+pub fn cleanup_clamp_joints(
+    mut commands: Commands,
+    physicals: Query<(), With<Physical>>,
+    joints: Query<(Entity, &ClampJoint)>,
+    mut clamps: Query<&mut ClampState>,
+) {
+    for (joint_entity, joint) in joints.iter() {
+        let owner_matches = clamps
+            .get(joint.owner)
+            .is_ok_and(|clamp| clamp.joint == Some(joint_entity));
+        if physicals.get(joint.owner).is_err() || !owner_matches {
+            commands.entity(joint_entity).despawn();
+        }
+    }
+
+    for mut clamp in clamps.iter_mut() {
+        let target_exists = clamp
+            .target
+            .is_none_or(|target| physicals.get(target).is_ok());
+        let joint_exists = clamp.joint.is_none_or(|joint| joints.get(joint).is_ok());
+        if !target_exists || !joint_exists {
+            if let Some(joint) = clamp.joint.take() {
+                commands.entity(joint).despawn();
+            }
+            clamp.target = None;
+            clamp.cooldown = CLAMP_COOLDOWN;
+        }
+    }
+}
 
 /// Apply the non-locomotion actuators for one fixed step. Split from the force
 /// apply pass only to keep borrow sets simple; runs inside `FixedUpdate`.
@@ -96,14 +147,8 @@ fn apply_one(
         let k = (OSC_RESPONSE * dt).clamp(0.0, 1.0);
         let osc_cost = (action.osc_freq - osc.freq).abs() * 0.005;
         let mut can_drive = osc_cost == 0.0;
-        if let Ok(mut physical) = physicals.get_mut(e) {
-            if physical.energy >= osc_cost {
-                physical.energy -= osc_cost;
-                can_drive = true;
-                if let Ok(mut ledger) = ledgers.get_mut(e) {
-                    ledger.spent_on_actuation += osc_cost;
-                }
-            }
+        if let (Ok(mut physical), Ok(mut ledger)) = (physicals.get_mut(e), ledgers.get_mut(e)) {
+            can_drive = ledger.debit_exact(&mut physical, EnergyFlow::Actuation, osc_cost);
         }
         if can_drive {
             osc.freq += (action.osc_freq - osc.freq) * k;
@@ -127,6 +172,7 @@ fn apply_one(
                             .spawn((
                                 avian2d::prelude::FixedJoint::new(e, target),
                                 avian2d::prelude::JointCollisionDisabled,
+                                ClampJoint { owner: e, target },
                             ))
                             .id(),
                     );
@@ -148,13 +194,11 @@ fn apply_one(
                 }
                 clamp.target = None;
                 clamp.cooldown = CLAMP_COOLDOWN;
-            } else if let Ok(mut phys) = physicals.get_mut(e) {
+            } else if let (Ok(mut phys), Ok(mut ledger)) =
+                (physicals.get_mut(e), ledgers.get_mut(e))
+            {
                 let cost = CLAMP_DRAIN * dt;
-                let spent = cost.min(phys.energy.max(0.0));
-                phys.energy -= spent;
-                if let Ok(mut ledger) = ledgers.get_mut(e) {
-                    ledger.spent_on_actuation += spent;
-                }
+                ledger.debit_available(&mut phys, EnergyFlow::Actuation, cost);
                 if phys.energy <= 0.0 {
                     if let Some(joint) = clamp.joint.take() {
                         commands.entity(joint).despawn();
@@ -172,15 +216,19 @@ fn apply_one(
             cd.remaining -= dt;
         }
         if action.fabricate > 0.5 && cd.remaining <= 0.0 {
-            if let Ok(mut phys) = physicals.get_mut(e) {
+            if let (Ok(mut phys), Ok(mut ledger)) = (physicals.get_mut(e), ledgers.get_mut(e)) {
                 if phys.energy >= FABRICATE_ENERGY_COST && phys.mass >= FABRICATE_MASS_COST {
-                    phys.energy -= FABRICATE_ENERGY_COST;
+                    let funded = ledger.debit_exact(
+                        &mut phys,
+                        EnergyFlow::Fabrication,
+                        FABRICATE_ENERGY_COST,
+                    );
+                    if !funded {
+                        return;
+                    }
                     phys.mass -= FABRICATE_MASS_COST;
                     if let Ok(mut mass) = masses.get_mut(e) {
                         mass.0 = phys.mass.max(0.05);
-                    }
-                    if let Ok(mut ledger) = ledgers.get_mut(e) {
-                        ledger.invested_in_fabrication += FABRICATE_ENERGY_COST;
                     }
                     cd.remaining = FABRICATE_COOLDOWN;
                     spawn_structure(
@@ -296,6 +344,18 @@ mod tests {
         }
     }
 
+    struct ClampHold;
+
+    impl Agent for ClampHold {
+        fn act(&mut self, _observation: &ObservationTensor) -> ActionTensor {
+            ActionTensor {
+                clamp: 1.0,
+                osc_freq: 1.0,
+                ..Default::default()
+            }
+        }
+    }
+
     #[test]
     fn fabrication_transfers_exact_mass_and_energy() {
         let mut simulation = crate::ErtwWorld::new(11);
@@ -354,5 +414,43 @@ mod tests {
         assert!(released.target.is_none());
         assert!(released.joint.is_none());
         assert!(released.cooldown > 0.0);
+    }
+
+    #[test]
+    fn clamp_cleanup_handles_target_and_owner_despawn() {
+        let mut target_case = crate::ErtwWorld::new(13);
+        let owner = target_case.spawn_agent(Box::new(ClampHold), Vec2::new(-0.75, 0.0));
+        let target = target_case.spawn_agent(Box::new(Passive), Vec2::new(0.75, 0.0));
+        target_case.step(1);
+        let joint = target_case
+            .app()
+            .world()
+            .get::<ClampState>(owner)
+            .and_then(|state| state.joint)
+            .expect("engaged joint");
+        target_case.app().world_mut().despawn(target);
+        target_case.step(1);
+        let state = target_case
+            .app()
+            .world()
+            .get::<ClampState>(owner)
+            .expect("owner");
+        assert!(state.target.is_none());
+        assert!(state.joint.is_none());
+        assert!(target_case.app().world().get_entity(joint).is_err());
+
+        let mut owner_case = crate::ErtwWorld::new(14);
+        let owner = owner_case.spawn_agent(Box::new(ClampHold), Vec2::new(-0.75, 0.0));
+        owner_case.spawn_agent(Box::new(Passive), Vec2::new(0.75, 0.0));
+        owner_case.step(1);
+        let joint = owner_case
+            .app()
+            .world()
+            .get::<ClampState>(owner)
+            .and_then(|state| state.joint)
+            .expect("engaged joint");
+        owner_case.app().world_mut().despawn(owner);
+        owner_case.step(1);
+        assert!(owner_case.app().world().get_entity(joint).is_err());
     }
 }

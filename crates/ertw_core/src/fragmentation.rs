@@ -13,7 +13,7 @@
 //! purely about energy/structure bookkeeping.
 
 use crate::components::{
-    AgentMarker, EnergyLedger, ImpulseAccum, NodeRng, Oscillator, Physical, Tags, Yield,
+    AgentMarker, EnergyFlow, EnergyLedger, ImpulseAccum, NodeRng, Oscillator, Physical, Tags, Yield,
 };
 use crate::tags::CustomTags;
 use bevy::prelude::*;
@@ -34,9 +34,12 @@ pub struct FragmentQueue {
     pub entities: Vec<(Entity, Option<Entity>, f32)>,
 }
 
+pub const MIN_DAUGHTER_MASS: f32 = 0.05;
+pub const MIN_DAUGHTER_STRUCTURE: f32 = 0.5;
+
 /// Flag `entity` for fragmentation (called from the drain system).
 pub fn queue_fragment(entity: Entity, killer: Option<Entity>, queue: &mut FragmentQueue) {
-    queue.entities.push((entity, killer, 0.0));
+    queue_fragment_with_share(entity, killer, 0.0, queue);
 }
 
 /// Like [`queue_fragment`] but pre-computes the consumption transfer share.
@@ -55,6 +58,17 @@ pub fn queue_fragment_with_share(
     {
         queue.entities.push((entity, killer, share));
     }
+}
+
+pub fn can_fragment(physical: &Physical, yield_threshold: Yield) -> bool {
+    physical.mass >= MIN_DAUGHTER_MASS * 2.0 && yield_threshold.0 >= MIN_DAUGHTER_STRUCTURE * 2.0
+}
+
+fn daughter_count(physical: &Physical, yield_threshold: Yield, rng: &mut StdRng) -> Option<usize> {
+    let by_mass = (physical.mass / MIN_DAUGHTER_MASS).floor() as usize;
+    let by_structure = (yield_threshold.0 / MIN_DAUGHTER_STRUCTURE).floor() as usize;
+    let maximum = by_mass.min(by_structure).min(3);
+    (maximum >= 2).then(|| rng.gen_range(2..=maximum))
 }
 
 /// Converts solved contact impulses into cumulative structural stress. Stress
@@ -100,7 +114,10 @@ pub fn accumulate_collision_damage(
             let excess = stress.value - yield_threshold.0;
             physical.structure -= excess * DAMAGE_SCALE;
             stress.value = yield_threshold.0 * 0.5;
-            if physical.structure <= 0.0 && physical.energy > 0.0 {
+            if physical.structure <= 0.0
+                && physical.energy > 0.0
+                && can_fragment(&physical, *yield_threshold)
+            {
                 let killer = tags
                     .get(source)
                     .ok()
@@ -134,26 +151,28 @@ pub fn run_fragmentation(
         Option<&AgentMarker>,
         Option<&EnergyLedger>,
     )>,
+    clamp_joints: Query<(Entity, &crate::components::ClampJoint)>,
 ) {
     let mut to_spawn: Vec<(Vec2, Physical, CustomTags, u64, u32)> = Vec::new();
     let mut to_despawn: Vec<Entity> = Vec::new();
 
-    for &(victim, _killer, share) in queue.entities.iter() {
+    for &(victim, _killer, _share) in queue.entities.iter() {
         let Ok((_e, tf, phys, tags, yld, rng, _agent, ledger)) = transforms.get(victim) else {
             continue;
         };
         let pos = tf.translation.truncate();
         let mut r = StdRng::seed_from_u64(rng.0 ^ 0x9E37_79B9);
 
-        // Energy budget: the killer's share (already deposited by
-        // [`transfer_to_killers`]) plus the daughters' combined share must
-        // equal the victim's pre-fragment energy. Subtract `share` here so
-        // the daughters receive only the remainder.
-        let victim_energy_for_daughters = (phys.energy - share).max(0.0);
+        // Any causal consumption transfer has already been debited by
+        // [`transfer_to_killers`]. Daughters divide the exact remainder.
+        let victim_energy_for_daughters = phys.energy.max(0.0);
         let victim_phys = phys;
 
-        // 2-3 daughters, conserving total mass and (post-consumption) energy.
-        let n = r.gen_range(2..=3);
+        // Restrict the daughter count to what the parent can fund without
+        // minimum-value clamps creating mass or structural capacity.
+        let Some(n) = daughter_count(victim_phys, *yld, &mut r) else {
+            continue;
+        };
         let child_energy = (victim_energy_for_daughters / n as f32).max(0.0);
         let child_mass = victim_phys.mass / n as f32;
         let child_struct = yld.0 / n as f32;
@@ -170,8 +189,8 @@ pub fn run_fragmentation(
                 .without(CustomTags::AGENT)
                 .without(CustomTags::CLAMP_CAPABLE);
             let child_phys = Physical {
-                mass: child_mass.max(0.05),
-                structure: child_struct.max(0.5),
+                mass: child_mass,
+                structure: child_struct,
                 energy: child_energy,
             };
             to_spawn.push((
@@ -186,18 +205,16 @@ pub fn run_fragmentation(
     }
 
     queue.entities.clear();
-    for e in to_despawn {
-        commands.entity(e).despawn();
-    }
+    crate::actuation::despawn_physical_entities(&mut commands, &to_despawn, &clamp_joints);
     for (pos, phys, tag_bits, rng_seed, born_step) in to_spawn {
         let tags = Tags(tag_bits);
         commands.spawn((
             Transform::from_translation(pos.extend(0.0)),
             avian2d::prelude::RigidBody::Dynamic,
             avian2d::prelude::Collider::circle(0.5),
-            avian2d::prelude::Mass(phys.mass.max(0.05)),
+            avian2d::prelude::Mass(phys.mass),
             phys,
-            Yield(phys.structure.max(0.5)),
+            Yield(phys.structure),
             crate::components::Conductivity(if tags.0.has(CustomTags::SHELTER) {
                 0.2
             } else {
@@ -228,20 +245,22 @@ pub fn run_fragmentation(
 #[allow(clippy::type_complexity)]
 pub fn transfer_to_killers(
     queue: Res<FragmentQueue>,
-    mut killers: Query<&mut Physical>,
-    mut killers_ledger: Query<&mut EnergyLedger>,
+    mut accounts: Query<(&mut Physical, &mut EnergyLedger)>,
 ) {
-    for &(_victim, killer, share) in queue.entities.iter() {
+    for &(victim, killer, share) in queue.entities.iter() {
         let Some(k) = killer else { continue };
         if share <= 0.0 {
             continue;
         }
-        if let Ok(mut k_phys) = killers.get_mut(k) {
-            k_phys.energy += share;
-        }
-        if let Ok(mut k_ledger) = killers_ledger.get_mut(k) {
-            k_ledger.consumed_from_others += share;
-        }
+        let Ok(
+            [(mut victim_physical, mut victim_ledger), (mut killer_physical, mut killer_ledger)],
+        ) = accounts.get_many_mut([victim, k])
+        else {
+            continue;
+        };
+        let transferred =
+            victim_ledger.debit_available(&mut victim_physical, EnergyFlow::Transferred, share);
+        killer_ledger.credit(&mut killer_physical, EnergyFlow::Consumed, transferred);
     }
 }
 
@@ -249,9 +268,10 @@ pub fn transfer_to_killers(
 mod tests {
     use super::*;
     use crate::components::{AgentMarker, EnergyLedger};
-    use crate::economy::transfer_energy;
     use crate::tags::CustomTags;
     use ertw_interface::{ActionTensor, Agent, ObservationTensor};
+    use proptest::prelude::any;
+    use proptest::{prop_assert, proptest};
 
     fn spawn_victim(world: &mut World, energy: f32, mass: f32, structure: f32) -> Entity {
         world
@@ -352,34 +372,19 @@ mod tests {
         let mut world = World::new();
         let v = spawn_victim(&mut world, 10.0, 6.0, 4.0);
         let k = spawn_killer_agent(&mut world, 0.0);
+        let mut queue = FragmentQueue::default();
+        queue_fragment_with_share(v, Some(k), 5.0, &mut queue);
+        world.insert_resource(queue);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(transfer_to_killers);
+        schedule.run(&mut world);
 
-        // Snapshot the killer's pre-transfer state, then drop the borrow
-        // before mutating. This mirrors the production flow where each
-        // `get_mut` borrow is short-lived.
-        let victim_phys = *world.get::<Physical>(v).unwrap();
-        let (killer_energy_before, killer_consumed_before) = {
-            let p = world.get::<Physical>(k).unwrap();
-            let l = world.get::<EnergyLedger>(k).unwrap();
-            (p.energy, l.consumed_from_others)
-        };
-
-        let mut victim_phys = victim_phys;
-        let share = {
-            let mut killer_phys = world.get_mut::<Physical>(k).unwrap();
-            transfer_energy(&mut victim_phys, &mut killer_phys);
-            victim_phys.energy
-        };
-        let mut killer_ledger = world.get_mut::<EnergyLedger>(k).unwrap();
-        killer_ledger.consumed_from_others += share;
-
-        assert_eq!(world.get::<Physical>(v).unwrap().energy, 10.0);
-        assert_eq!(
-            world.get::<Physical>(k).unwrap().energy,
-            killer_energy_before + 5.0
-        );
+        assert_eq!(world.get::<Physical>(v).unwrap().energy, 5.0);
+        assert_eq!(world.get::<Physical>(k).unwrap().energy, 5.0);
+        assert_eq!(world.get::<EnergyLedger>(v).unwrap().transferred_out, 5.0);
         assert_eq!(
             world.get::<EnergyLedger>(k).unwrap().consumed_from_others,
-            killer_consumed_before + 5.0
+            5.0
         );
 
         // Daughters split the remaining half (5.0). Sum across the random
@@ -388,6 +393,50 @@ mod tests {
         let n = r.gen_range(2..=3);
         let total_daughters: f32 = (0..n).map(|_| 5.0_f32 / n as f32).sum();
         assert!((total_daughters - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn undersized_parent_cannot_create_mass_by_fragmenting() {
+        let physical = Physical {
+            mass: MIN_DAUGHTER_MASS,
+            structure: 0.0,
+            energy: 1.0,
+        };
+        assert!(!can_fragment(&physical, Yield(2.0)));
+        let mut rng = StdRng::seed_from_u64(1);
+        assert_eq!(daughter_count(&physical, Yield(2.0), &mut rng), None);
+    }
+
+    proptest! {
+        #[test]
+        fn viable_fragmentation_preserves_mass_and_energy(
+            mass in 0.1_f32..100.0,
+            structure in 1.0_f32..100.0,
+            energy in 0.0_f32..1_000.0,
+            seed in any::<u64>(),
+        ) {
+            let physical = Physical {
+                mass,
+                structure: 0.0,
+                energy,
+            };
+            let yield_threshold = Yield(structure);
+            let mut rng = StdRng::seed_from_u64(seed);
+            let count = daughter_count(&physical, yield_threshold, &mut rng)
+                .expect("generated parent is viable");
+            let child_mass = mass / count as f32;
+            let child_structure = structure / count as f32;
+            let child_energy = energy / count as f32;
+            let mass_error = (child_mass * count as f32 - mass).abs();
+            let structure_error = (child_structure * count as f32 - structure).abs();
+            let energy_error = (child_energy * count as f32 - energy).abs();
+
+            prop_assert!(child_mass >= MIN_DAUGHTER_MASS);
+            prop_assert!(child_structure >= MIN_DAUGHTER_STRUCTURE);
+            prop_assert!(mass_error <= mass.max(1.0) * f32::EPSILON);
+            prop_assert!(structure_error <= structure.max(1.0) * f32::EPSILON);
+            prop_assert!(energy_error <= energy.max(1.0) * f32::EPSILON);
+        }
     }
 
     struct Passive;
@@ -409,7 +458,7 @@ mod tests {
             .world_mut()
             .resource_mut::<crate::SimClock>()
             .step = 1;
-        for (entity, velocity) in [(first, 5.0), (second, -5.0)] {
+        for (entity, velocity) in [(first, 50.0), (second, -50.0)] {
             simulation
                 .app()
                 .world_mut()
@@ -420,7 +469,7 @@ mod tests {
                 .world_mut()
                 .get_mut::<Yield>(entity)
                 .expect("yield")
-                .0 = 0.001;
+                .0 = MIN_DAUGHTER_STRUCTURE * 2.0;
             simulation
                 .app()
                 .world_mut()

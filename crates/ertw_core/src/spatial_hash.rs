@@ -5,6 +5,7 @@
 //! Standard crates lag Bevy 0.19, and the spec explicitly requires a spatial hash,
 //! so we implement a minimal, lock-free-per-frame rebuild structure.
 
+use bevy::ecs::query::QueryFilter;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
@@ -37,7 +38,7 @@ pub struct SpatialHash {
 impl SpatialHash {
     /// Rebuild the index from a position query. Call once at the start of each
     /// fixed step before any neighbor queries.
-    pub fn rebuild(&mut self, positions: &Query<(Entity, &Transform)>) {
+    pub fn rebuild<F: QueryFilter>(&mut self, positions: &Query<(Entity, &Transform), F>) {
         self.cells.clear();
         for (e, tf) in positions.iter() {
             let cell = Cell::from_pos(tf.translation.truncate());

@@ -24,9 +24,13 @@ noise = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 ertw_interface = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 random_policy = { path = "../../agents/random_policy" }
+proptest = { workspace = true }
 
 [features]
 default = []

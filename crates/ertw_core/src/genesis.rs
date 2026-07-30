@@ -10,8 +10,8 @@
 //! at spawn (see [`crate::components::AgentMarker`]).
 
 use crate::components::{
-    AgentMarker, AgentTuning, ClampState, FabricateCooldown, ImpulseAccum, NodeRng, Oscillator,
-    Physical, Tags,
+    AgentMarker, AgentTuning, ChunkOrigin, ClampState, FabricateCooldown, ImpulseAccum, NodeRng,
+    Oscillator, Physical, Tags,
 };
 use crate::tags::CustomTags;
 use bevy::prelude::*;
@@ -62,6 +62,14 @@ impl ChunkManager {
             seed,
             ..Default::default()
         }
+    }
+
+    pub fn active_chunks(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.active.iter().copied()
+    }
+
+    pub fn restore_active_chunks(&mut self, chunks: impl IntoIterator<Item = (i32, i32)>) {
+        self.active = chunks.into_iter().collect();
     }
 
     /// Compute the deterministic spawn plan for an initial population across a
@@ -135,6 +143,7 @@ impl ChunkManager {
                     TerrainKind::Shelter => (1.0, 14.0, 2.0, 0.2),
                 };
                 TerrainSpawn {
+                    chunk_origin: ChunkOrigin { x: cx, y: cy },
                     pos: base
                         + fraction * CHUNK_SIZE
                         + Vec2::new(rng.gen_range(-0.5..0.5), rng.gen_range(-0.5..0.5)),
@@ -153,12 +162,14 @@ impl ChunkManager {
 /// Keeps a deterministic one-chunk halo active around every live agent.
 /// Inactive non-agent nodes are discarded and recreate from the seed when the
 /// chunk becomes active again.
+#[allow(clippy::type_complexity)]
 pub fn stream_chunks(
     mut commands: Commands,
     clock: Res<crate::SimClock>,
     mut chunks: ResMut<ChunkManager>,
     agents: Query<&Transform, With<AgentMarker>>,
-    nodes: Query<(Entity, &Transform, Has<AgentMarker>), With<Physical>>,
+    nodes: Query<(Entity, &Transform, Option<&ChunkOrigin>, Has<AgentMarker>), With<Physical>>,
+    clamp_joints: Query<(Entity, &crate::components::ClampJoint)>,
 ) {
     if !clock.step.is_multiple_of(120) {
         return;
@@ -187,19 +198,26 @@ pub fn stream_chunks(
         .difference(&desired)
         .copied()
         .collect::<BTreeSet<_>>();
-    for (entity, transform, is_agent) in nodes.iter() {
+    let mut to_despawn = Vec::new();
+    for (entity, transform, origin, is_agent) in nodes.iter() {
         if is_agent {
             continue;
         }
-        let position = transform.translation.truncate();
-        let coordinate = (
-            (position.x / CHUNK_SIZE).floor() as i32,
-            (position.y / CHUNK_SIZE).floor() as i32,
+        let coordinate = origin.map_or_else(
+            || {
+                let position = transform.translation.truncate();
+                (
+                    (position.x / CHUNK_SIZE).floor() as i32,
+                    (position.y / CHUNK_SIZE).floor() as i32,
+                )
+            },
+            |origin| (origin.x, origin.y),
         );
         if inactive.contains(&coordinate) {
-            commands.entity(entity).despawn();
+            to_despawn.push(entity);
         }
     }
+    crate::actuation::despawn_physical_entities(&mut commands, &to_despawn, &clamp_joints);
     chunks.active = desired;
 }
 
@@ -280,6 +298,7 @@ impl TerrainKind {
 /// and input to [`spawn_genesis_node`].
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainSpawn {
+    pub chunk_origin: ChunkOrigin,
     pub pos: Vec2,
     pub node_rng: u64,
     pub kind: TerrainKind,
@@ -312,6 +331,7 @@ pub fn spawn_genesis_node(commands: &mut Commands, spawn: TerrainSpawn) -> Entit
             crate::components::EnergyLedger::default(),
             NodeRng(spawn.node_rng),
             Oscillator::default(),
+            spawn.chunk_origin,
         ))
         .id()
 }
@@ -358,13 +378,27 @@ mod tests {
         simulation.step(1);
 
         let world = simulation.app().world_mut();
-        let mut nodes = world.query_filtered::<(&Transform, Has<AgentMarker>), With<Physical>>();
-        let inert_chunks = nodes
+        let active_chunks = world
+            .resource::<ChunkManager>()
+            .active_chunks()
+            .collect::<BTreeSet<_>>();
+        let mut nodes =
+            world.query_filtered::<(Option<&ChunkOrigin>, Has<AgentMarker>), With<Physical>>();
+        let inert_origins = nodes
             .iter(world)
             .filter(|(_, is_agent)| !*is_agent)
-            .map(|(transform, _)| (transform.translation.x / CHUNK_SIZE).floor() as i32)
+            .map(|(origin, _)| {
+                let origin = origin.expect("streamed terrain origin");
+                (origin.x, origin.y)
+            })
             .collect::<Vec<_>>();
-        assert_eq!(inert_chunks.len(), 45);
-        assert!(inert_chunks.iter().all(|cx| (3..=5).contains(cx)));
+        assert_eq!(active_chunks.len(), 9);
+        assert_eq!(inert_origins.len(), 45);
+        assert!(
+            inert_origins
+                .iter()
+                .all(|origin| active_chunks.contains(origin)),
+            "terrain survived outside active origins: {inert_origins:?}"
+        );
     }
 }

@@ -12,7 +12,7 @@
 /// Self-contained 2D vector so the interface crate stays free of Bevy grid
 /// dependencies for downstream consumers (external adapters need not pull Bevy).
 /// The world converts this to/from `bevy::math::Vec2` at the boundary.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Vec2Lite {
     pub x: f32,
     pub y: f32,
@@ -48,7 +48,7 @@ impl Vec2Lite {
 /// The world streams an egocentric window of `max_neighbors` entities (padded
 /// with zero-state ghost nodes) plus `field_samples` samples of each global
 /// field across a bounded `sensor_radius`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InterfaceConfig {
     /// Hard cap on how many neighbors are reported. Real neighbors within the
     /// sensor radius are sorted by ascending distance then padded with ghost
@@ -147,7 +147,7 @@ pub const ACTION_STRIDE: usize = 7;
 
 /// Continuous action emitted *every* step. Every actuator call costs stored
 /// energy — there is no free action. The world interprets and bounds these.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ActionTensor {
     pub force: Vec2Lite,
     pub torque: f32,
@@ -362,7 +362,88 @@ pub const WIRE_MAGIC: u32 = u32::from_le_bytes(*b"ERTW");
 pub const FRAME_HELLO: u32 = 1;
 pub const FRAME_OBSERVATION: u32 = 2;
 pub const FRAME_ACTION: u32 = 3;
+pub const FRAME_METADATA: u32 = 4;
+pub const FRAME_LIFECYCLE: u32 = 5;
+pub const FRAME_RESUME: u32 = 6;
+pub const FRAME_SNAPSHOT: u32 = 7;
+pub const FRAME_OBSERVATION_EXTENSION: u32 = 8;
 pub const WIRE_HEADER_LEN: usize = 14;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportMode {
+    Realtime,
+    Lockstep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerSemantics {
+    Continuous,
+    Level,
+    Edge,
+    Target,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ProtocolMetadata {
+    pub protocol_version: u8,
+    pub schema_version: u16,
+    pub fixed_timestep_seconds: f32,
+    pub physics_ticks_per_decision: u32,
+    pub observation_floats: usize,
+    pub action_floats: usize,
+    pub self_stride: usize,
+    pub neighbor_stride: usize,
+    pub field_count: usize,
+    pub max_neighbors: usize,
+    pub field_samples: usize,
+    pub field_channels: usize,
+    pub sensor_radius: f32,
+    pub action_min: [f32; ACTION_STRIDE],
+    pub action_max: [f32; ACTION_STRIDE],
+    pub action_semantics: [TriggerSemantics; ACTION_STRIDE],
+    pub transport_mode: TransportMode,
+    pub world_seed: u64,
+    pub world_tick: u64,
+    pub world_id: u128,
+    pub session_id: u128,
+    pub resume_token: String,
+    pub stable_agent_id: u64,
+    pub snapshot_schema_version: u16,
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleKind {
+    EntityAlive,
+    EntityDied,
+    EntityReproduced,
+    EntityReplaced,
+    WorldTerminated,
+    SessionAttached,
+    SessionDetached,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct LifecycleEvent {
+    pub sequence: u64,
+    pub world_tick: u64,
+    pub kind: LifecycleKind,
+    pub subject_id: u64,
+    pub related_id: Option<u64>,
+    pub lineage_id: Option<u64>,
+    pub generation: Option<u32>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PhysicalDelta {
+    pub energy: f32,
+    pub structure: f32,
+    pub mass: f32,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WireHeader {

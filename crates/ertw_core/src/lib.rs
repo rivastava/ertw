@@ -12,6 +12,7 @@ pub mod fields;
 pub mod fragmentation;
 pub mod genesis;
 pub mod lineage;
+pub mod snapshot;
 pub mod spatial_hash;
 pub mod tags;
 
@@ -23,9 +24,9 @@ use fields::{advance_fields, FieldSampler, SimSeed};
 
 /// Protocol version for the wire header (spec: raw f32 + minimal header).
 ///
-/// Version 3 is self-describing, carries full 64-bit step/entity identifiers,
-/// and encodes tags losslessly as four 16-bit float channels.
-pub const PROTOCOL_VERSION: u8 = 3;
+/// Version 4 adds lockstep metadata, lifecycle, resume, snapshot, and optional
+/// delta frames to the exact-tag/full-identifier protocol.
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// Named set grouping every fixed-step simulation system configured by
 /// [`configure_world`]. Exposed so external front-ends (e.g. the rendered HUD)
@@ -83,8 +84,10 @@ pub fn configure_world(app: &mut App, seed: u64) {
         .insert_resource(spatial_hash::SpatialHash::default())
         .insert_resource(PendingActions::default())
         .insert_resource(SimClock::default())
+        .insert_resource(snapshot::StableIdAllocator::default())
         .insert_resource(lineage::AgentHistory::default())
         .insert_resource(fragmentation::FragmentQueue::default())
+        .insert_resource(economy::DeathQueue::default())
         .insert_resource(genesis::ChunkManager::new(seed))
         .init_resource::<FieldSampler>()
         .configure_sets(
@@ -104,6 +107,7 @@ pub fn configure_world(app: &mut App, seed: u64) {
             (
                 advance_fields,
                 rebuild_spatial_hash,
+                actuation::cleanup_clamp_joints,
                 gather_agent_actions,
                 apply_agent_actions,
                 actuation::apply_actuators,
@@ -123,6 +127,7 @@ pub fn configure_world(app: &mut App, seed: u64) {
                 fragmentation::accumulate_collision_damage,
                 fragmentation::transfer_to_killers,
                 fragmentation::run_fragmentation,
+                economy::run_deaths,
                 genesis::stream_chunks,
                 advance_sim_clock,
                 lineage::record_agent_history,
@@ -213,6 +218,7 @@ impl ErtwWorld {
                 .resource_mut::<Time>()
                 .advance_by(std::time::Duration::from_secs_f32(economy::FIXED_DT));
             world.run_schedule(FixedUpdate);
+            world.clear_trackers();
         }
     }
 
@@ -224,7 +230,7 @@ impl ErtwWorld {
 
 /// Rebuild the spatial hash each fixed step before any neighbor queries.
 pub fn rebuild_spatial_hash(
-    positions: Query<(Entity, &Transform)>,
+    positions: Query<(Entity, &Transform), With<components::Physical>>,
     mut spatial: ResMut<spatial_hash::SpatialHash>,
 ) {
     spatial.rebuild(&positions);
@@ -256,21 +262,22 @@ fn gather_agent_actions(
     agents: Query<(Entity, &components::AgentMarker)>,
     transforms: Query<(Entity, &Transform)>,
     mut pending: ResMut<PendingActions>,
+    mut observation_scratch: Local<agents::ObservationScratch>,
+    mut jobs: Local<Vec<(Entity, u64)>>,
+    mut active: Local<std::collections::HashSet<u64>>,
 ) {
-    let mut jobs: Vec<(Entity, u64)> = Vec::new();
+    jobs.clear();
     for (e, m) in agents.iter() {
         jobs.push((e, m.controller));
     }
-    let active = jobs
-        .iter()
-        .map(|(_, controller)| *controller)
-        .collect::<std::collections::HashSet<_>>();
+    active.clear();
+    active.extend(jobs.iter().map(|(_, controller)| *controller));
     world_agents.retain(&active);
 
     pending.items.clear();
-    for (e, ctrl) in jobs {
+    for (e, ctrl) in jobs.iter().copied() {
         let Ok(tune) = tuning.get(e) else { continue };
-        let Some(obs) = agents::build_observation(
+        let Some(obs) = agents::build_observation_with_scratch(
             e,
             tune,
             &clock,
@@ -282,6 +289,7 @@ fn gather_agent_actions(
             &tags,
             &conductivities,
             &oscillators,
+            &mut observation_scratch,
         ) else {
             continue;
         };
@@ -310,12 +318,8 @@ fn apply_agent_actions(
         let e = *e;
         let cost = (action.force.length() + action.torque.abs()) * 0.1;
         let (mut applied_force, mut applied_torque) = (Vec2::ZERO, 0.0f32);
-        if let Ok(mut phys) = physicals.get_mut(e) {
-            if phys.energy >= cost {
-                phys.energy -= cost;
-                if let Ok(mut ledger) = ledgers.get_mut(e) {
-                    ledger.spent_on_actuation += cost;
-                }
+        if let (Ok(mut phys), Ok(mut ledger)) = (physicals.get_mut(e), ledgers.get_mut(e)) {
+            if ledger.debit_exact(&mut phys, components::EnergyFlow::Actuation, cost) {
                 applied_force = Vec2::new(action.force.x, action.force.y);
                 applied_torque = action.torque;
             }
@@ -349,10 +353,18 @@ mod tests {
         let e = world.spawn_agent(Box::new(NullAgent), Vec2::ZERO);
         // Run well past the expected lifetime (energy 20, drain ~0.6/s @ 60Hz).
         world.step(60 * 60);
-        let alive = world.app().world().get_entity(e).is_ok();
+        let alive = world
+            .app()
+            .world()
+            .get::<components::AgentMarker>(e)
+            .is_some();
         assert!(
             !alive,
             "passive agent should have died from thermodynamic decay"
+        );
+        assert!(
+            world.app().world().get_entity(e).is_err()
+                || world.app().world().get::<components::DeadNode>(e).is_some()
         );
         let outcomes = lineage::collect_competence(world.app().world_mut(), 60 * 60);
         assert!(outcomes.iter().any(|outcome| outcome.entity == e.to_bits()));
@@ -471,7 +483,7 @@ mod tests {
             "ghost must remain a ghost after roundtrip"
         );
         assert_eq!(back.neighbors[0].tags, 0xFFFF_FFFF_0000_0001);
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
         // And the wire payload must match ACTION_STRIDE for the response side.
         assert_eq!(ACTION_STRIDE, 7);
     }
