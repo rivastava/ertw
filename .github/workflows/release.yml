@@ -13,14 +13,23 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: ertw-linux-x86_64
-            binary: target/release/ertw
+            artifact: ertw-linux-x86_64-binaries
+            observer_source: target/release/ertw
+            observer_asset: ertw-linux-x86_64
+            lockstep_source: target/release/ertw-lockstep
+            lockstep_asset: ertw-lockstep-linux-x86_64
           - os: macos-14
-            artifact: ertw-macos-arm64
-            binary: target/release/ertw
+            artifact: ertw-macos-arm64-binaries
+            observer_source: target/release/ertw
+            observer_asset: ertw-macos-arm64
+            lockstep_source: target/release/ertw-lockstep
+            lockstep_asset: ertw-lockstep-macos-arm64
           - os: windows-latest
-            artifact: ertw-windows-x86_64.exe
-            binary: target/release/ertw.exe
+            artifact: ertw-windows-x86_64-binaries
+            observer_source: target/release/ertw.exe
+            observer_asset: ertw-windows-x86_64.exe
+            lockstep_source: target/release/ertw-lockstep.exe
+            lockstep_asset: ertw-lockstep-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -28,14 +37,21 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev
-      - run: cargo build --release -p ertw_render --bin ertw --features render
-      - name: Stage artifact
+      - name: Build observer and lockstep binaries
+        run: |
+          cargo build --release -p ertw_render --bin ertw --features render
+          cargo build --release -p ertw_server --bin ertw-lockstep
+      - name: Stage artifacts
         shell: bash
-        run: cp "${{ matrix.binary }}" "${{ matrix.artifact }}"
+        run: |
+          cp "${{ matrix.observer_source }}" "${{ matrix.observer_asset }}"
+          cp "${{ matrix.lockstep_source }}" "${{ matrix.lockstep_asset }}"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.observer_asset }}
+            ${{ matrix.lockstep_asset }}
 
   publish:
     needs: build
@@ -45,6 +61,9 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum * > SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*

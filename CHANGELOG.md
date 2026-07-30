@@ -3,7 +3,7 @@
 All notable changes are documented here. ERTW follows Semantic Versioning once
 public versions are tagged.
 
-## Unreleased
+## 0.1.0 - 2026-07-30
 
 - Added the native `ertw` observer binary and fixed native event-loop startup.
 - Enabled embedded egui fonts and gizmo rendering, and configured a world-scale
