@@ -155,6 +155,44 @@ pub fn build_observation(
     conductivities: &Query<&crate::components::Conductivity>,
     oscillators: &Query<&crate::components::Oscillator>,
 ) -> Option<ObservationTensor> {
+    let mut scratch = ObservationScratch::default();
+    build_observation_with_scratch(
+        entity,
+        tune,
+        clock,
+        sampler,
+        spatial,
+        transforms,
+        velocities,
+        physicals,
+        tags,
+        conductivities,
+        oscillators,
+        &mut scratch,
+    )
+}
+
+#[derive(Default)]
+pub(crate) struct ObservationScratch {
+    near: Vec<Entity>,
+    views: Vec<(f32, NeighborView)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_observation_with_scratch(
+    entity: Entity,
+    tune: &AgentTuning,
+    clock: &crate::SimClock,
+    sampler: &FieldSampler,
+    spatial: &SpatialHash,
+    transforms: &Query<(Entity, &Transform)>,
+    velocities: &Query<&LinearVelocity>,
+    physicals: &Query<&crate::components::Physical>,
+    tags: &Query<&crate::components::Tags>,
+    conductivities: &Query<&crate::components::Conductivity>,
+    oscillators: &Query<&crate::components::Oscillator>,
+    scratch: &mut ObservationScratch,
+) -> Option<ObservationTensor> {
     let config = InterfaceConfig {
         max_neighbors: tune.max_neighbors,
         sensor_radius: tune.sensor_radius,
@@ -210,10 +248,9 @@ pub fn build_observation(
     }
 
     // Neighbors via spatial hash within sensor radius.
-    let mut near: Vec<Entity> = Vec::new();
-    spatial.query_radius(self_pos, config.sensor_radius, &mut near);
-    let mut views: Vec<(f32, NeighborView)> = Vec::new();
-    for other in near {
+    spatial.query_radius(self_pos, config.sensor_radius, &mut scratch.near);
+    scratch.views.clear();
+    for other in scratch.near.iter().copied() {
         if other == entity {
             continue;
         }
@@ -235,7 +272,7 @@ pub fn build_observation(
         let rel_vel = (inverse_rotation * world_rel_vel.extend(0.0)).truncate();
         let cond = conductivities.get(other).map(|c| c.0).unwrap_or(0.6);
         let osc = oscillators.get(other).ok();
-        views.push((
+        scratch.views.push((
             dist2,
             NeighborView {
                 rel_pos: Vec2Lite::new(rel_pos.x, rel_pos.y),
@@ -251,9 +288,18 @@ pub fn build_observation(
             },
         ));
     }
-    views.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    for (i, (_, v)) in views.into_iter().take(config.max_neighbors).enumerate() {
-        obs.neighbors[i] = v;
+    let keep = config.max_neighbors.min(scratch.views.len());
+    if keep < scratch.views.len() {
+        scratch.views.select_nth_unstable_by(keep, |a, b| {
+            a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scratch.views.truncate(keep);
+    }
+    scratch
+        .views
+        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (index, (_, view)) in scratch.views.iter().copied().enumerate() {
+        obs.neighbors[index] = view;
     }
     Some(obs)
 }

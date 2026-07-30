@@ -1,5 +1,7 @@
 //! Non-blocking TCP bridge for the ERTW protocol.
 
+pub mod lockstep;
+
 use ertw_core::ErtwWorld;
 use ertw_interface::{
     wire_header, ActionTensor, Agent, InterfaceConfig, ObservationTensor, WireHeader,
@@ -10,8 +12,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Mutex;
 
-const HEADER_BYTES: usize = WIRE_HEADER_LEN * std::mem::size_of::<u32>();
-const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const HEADER_BYTES: usize = WIRE_HEADER_LEN * std::mem::size_of::<u32>();
+pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ACTION_AGE: u64 = 2;
 
 pub fn encode_hello(version: u8, config: InterfaceConfig) -> Vec<u8> {
@@ -95,7 +97,7 @@ pub fn decode_action(bytes: &[u8]) -> Option<(u64, u64, ActionTensor)> {
     Some((step, entity, ActionTensor::from_f32(&action_values)))
 }
 
-fn encode_header(header: [u32; WIRE_HEADER_LEN]) -> Vec<u8> {
+pub(crate) fn encode_header(header: [u32; WIRE_HEADER_LEN]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(HEADER_BYTES);
     for value in header {
         bytes.extend_from_slice(&value.to_le_bytes());
@@ -103,7 +105,7 @@ fn encode_header(header: [u32; WIRE_HEADER_LEN]) -> Vec<u8> {
     bytes
 }
 
-fn decode_header(bytes: &[u8]) -> Option<[u32; WIRE_HEADER_LEN]> {
+pub(crate) fn decode_header(bytes: &[u8]) -> Option<[u32; WIRE_HEADER_LEN]> {
     if bytes.len() != HEADER_BYTES {
         return None;
     }
@@ -115,7 +117,7 @@ fn decode_header(bytes: &[u8]) -> Option<[u32; WIRE_HEADER_LEN]> {
     Some(header)
 }
 
-fn read_frame(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+pub(crate) fn read_frame(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut header_bytes = [0; HEADER_BYTES];
     stream.read_exact(&mut header_bytes)?;
     let header = decode_header(&header_bytes)

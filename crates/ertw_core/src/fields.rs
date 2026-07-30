@@ -76,6 +76,10 @@ impl FromWorld for FieldSampler {
 }
 
 impl FieldSampler {
+    pub fn set_time(&mut self, time: f32) {
+        self.time = time;
+        self.refresh_drift();
+    }
     /// Sample the three fields at a world position, given the current time.
     pub fn sample(&self, pos: Vec2) -> FieldSample {
         // Offset by half a cell so exact integer world coordinates don't land on

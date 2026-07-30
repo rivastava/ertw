@@ -6,7 +6,7 @@
 //! records the offline evaluator ranks by. No reward is computed here.
 
 use crate::components::{
-    AgentBundle, AgentMarker, AgentTuning, ClampState, EnergyLedger, FabricateCooldown,
+    AgentBundle, AgentMarker, AgentTuning, ClampState, EnergyFlow, EnergyLedger, FabricateCooldown,
     ImpulseAccum, NodeRng, Oscillator, Physical, ReproductionState, Tags, Yield,
 };
 use bevy::prelude::*;
@@ -79,10 +79,16 @@ pub fn reproduce_agents(
             osc_baseline: (tuning.osc_baseline + rng.gen_range(-0.15..0.15)).clamp(-16.0, 16.0),
         };
 
-        physical.energy -= REPRODUCTION_ENERGY_COST;
+        if !ledger.debit_exact(
+            &mut physical,
+            EnergyFlow::Offspring,
+            REPRODUCTION_ENERGY_COST,
+        ) {
+            reproduction.surplus_seconds = 0.0;
+            continue;
+        }
         physical.mass -= REPRODUCTION_MASS_COST;
         mass.0 = physical.mass.max(0.05);
-        ledger.invested_in_offspring += REPRODUCTION_ENERGY_COST;
         reproduction.surplus_seconds = 0.0;
         reproduction.cooldown_seconds = REPRODUCTION_COOLDOWN_SECONDS;
         node_rng.0 = child_seed.rotate_left(17);

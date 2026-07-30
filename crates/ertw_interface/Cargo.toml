@@ -13,3 +13,6 @@ workspace = true
 
 [features]
 default = []
+
+[dependencies]
+serde = { workspace = true }

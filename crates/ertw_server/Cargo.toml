@@ -15,7 +15,15 @@ workspace = true
 ertw_interface = { workspace = true }
 ertw_core = { workspace = true }
 bevy = { workspace = true, default-features = false, features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+rand = { workspace = true }
 
 [[bin]]
 name = "ertw-server"
 path = "src/bin/ertw-server.rs"
+
+[[bin]]
+name = "ertw-lockstep"
+path = "src/bin/ertw-lockstep.rs"

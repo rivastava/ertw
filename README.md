@@ -24,6 +24,9 @@ cargo run -p ertw_render --bin ertw --features render
 
 # External agent server: address, simulated steps, seed
 cargo run -p ertw_server --bin ertw-server -- 127.0.0.1:9000 600 12648430
+
+# Slow-agent lockstep: address, decisions, seed, physics ticks per decision
+cargo run -p ertw_server --bin ertw-lockstep -- 127.0.0.1:9000 600 12648430 4
 ```
 
 The native executable is written to `target/debug/ertw` (or `ertw.exe` on
@@ -49,7 +52,7 @@ performance evidence, and signed packaging.
 | 7 | Procedural genesis & chunk streaming | ✅ |
 | 8 | Lineage & population dynamics | ✅ |
 | 9 | Visualization: gizmo overlay + **egui HUD** | ✅ |
-| 10 | Network/IPC bridge (`ertw_server`, framed protocol v3) | ✅ |
+| 10 | Network/IPC bridge (`ertw_server`, framed protocol v4) | ✅ |
 | 11 | External evaluator (`ertw_evaluator`, historical competence ranking) | ✅ |
 
 ## Crates
@@ -61,8 +64,9 @@ performance evidence, and signed packaging.
 - **`ertw_interface`** — `ObservationTensor` / `ActionTensor` + the `Agent`
   trait + the wire header. It has no Bevy dependency, keeping external adapters
   lightweight.
-- **`ertw_server`** — optional TCP bridge. `RemoteAgent` + `serve_one` exchange
-  framed observation/action messages without blocking simulation ticks.
+- **`ertw_server`** — optional TCP bridge. It supports non-blocking real-time
+  exchange and slow-agent lockstep with action hold, lifecycle events, resume,
+  physical deltas, and canonical snapshots.
 - **`ertw_render`** — native `ertw` observer binary with Bevy gizmos and an
   `bevy_egui` HUD. Feature-gated (`render`).
 - **`ertw_evaluator`** — `CompetenceRecord` + `rank`, plus an `evaluate`
@@ -83,7 +87,7 @@ continuous `ActionTensor`:
   `osc_freq`, `osc_phase`. Every actuator call costs stored energy — there is no
   free action.
 
-Protocol v3 uses self-describing length-prefixed little-endian frames with full
+Protocol v4 uses self-describing length-prefixed little-endian frames with full
 64-bit step/entity IDs and contiguous `f32` payloads. See
 `docs/PROTOCOL.md` for the exact layout.
 
@@ -106,9 +110,9 @@ genesis chunk distribution.
 ## Build / verify
 
 ```powershell
-cargo build --workspace --all-targets
-cargo test --workspace
-cargo clippy --workspace --all-targets
+cargo build --workspace --all-targets --all-features
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 
 # Explicit performance and long-run gates
@@ -117,15 +121,17 @@ cargo test -p ertw_core bounded_state_soak -- --ignored
 ```
 
 The benchmark defaults to 32 agents and 300 ticks. Override it with
-`ERTW_BENCH_AGENTS` and `ERTW_BENCH_STEPS`; the current scale-dependent physics
-performance limitation appears above roughly 40 bodies on the audit Mac and
-still requires profiler-guided investigation.
+`ERTW_BENCH_AGENTS` and `ERTW_BENCH_STEPS`. A July 2026 audit run on Apple
+Silicon measured approximately 38k, 23k, and 34k agent-steps/s at 32, 64, and
+128 agents respectively. These are local smoke measurements, not portable
+performance guarantees; geometry and physics contacts materially affect them.
 
 ## Research-preview limitations
 
 - Public cross-platform CI and release workflows are present but do not have a
   published run history yet.
-- Large-population physics throughput has a scale-dependent performance cliff.
+- Large-population throughput still needs profiler traces and repeatable
+  multi-machine baselines; the included harness is a scale smoke test.
 - The evaluator is an initial lexicographic comparison, not a validated general
   intelligence score.
 - The TCP bridge has been tested end-to-end with an external Python NEAT
