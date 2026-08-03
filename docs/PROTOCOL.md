@@ -116,3 +116,15 @@ Transport session IDs and resume tokens come from operating-system randomness
 and do not affect deterministic world physics. TCP transport is not encrypted
 or authenticated beyond the opaque resume token; bind to loopback or place ERTW
 behind an authenticated secure tunnel on untrusted networks.
+
+## Python reference client
+
+The dependency-free client in `clients/python` validates protocol metadata and
+frame dimensions before exposing observations. Its opt-in interoperability test
+launches the Rust lockstep server, exchanges actions across three decision
+boundaries, disconnects, and resumes the same session:
+
+```text
+PYTHONPATH=clients/python/src ERTW_RUN_RUST_INTEROP=1 \
+  python3 -m unittest discover -s clients/python/tests -v
+```

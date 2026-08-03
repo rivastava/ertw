@@ -73,6 +73,8 @@ performance evidence, and signed packaging.
   example that ranks live and historical agents by survival, generation, and
   accumulated incoming energy.
 - **`agents/random_policy`** — reference in-process agent.
+- **`clients/python`** — dependency-free protocol v4 lockstep client with
+  strict frame validation, lifecycle handling, and reconnect/resume support.
 
 ## The interface contract
 
@@ -89,7 +91,8 @@ continuous `ActionTensor`:
 
 Protocol v4 uses self-describing length-prefixed little-endian frames with full
 64-bit step/entity IDs and contiguous `f32` payloads. See
-`docs/PROTOCOL.md` for the exact layout.
+`docs/PROTOCOL.md` for the exact layout. The official Python client and its
+conformance tests live under `clients/python`.
 
 ## Native observer
 
