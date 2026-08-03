@@ -19,8 +19,17 @@ class RustInteropTests(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         address = ("127.0.0.1", port)
-        process = subprocess.Popen(
-            [
+        configured_server = os.environ.get("ERTW_LOCKSTEP_BIN")
+        if configured_server:
+            server_command = [
+                configured_server,
+                f"{address[0]}:{address[1]}",
+                "3",
+                "42",
+                "1",
+            ]
+        else:
+            server_command = [
                 "cargo",
                 "run",
                 "--quiet",
@@ -33,7 +42,9 @@ class RustInteropTests(unittest.TestCase):
                 "3",
                 "42",
                 "1",
-            ],
+            ]
+        process = subprocess.Popen(
+            server_command,
             cwd=repository,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -88,6 +99,8 @@ class RustInteropTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
 
 
 if __name__ == "__main__":

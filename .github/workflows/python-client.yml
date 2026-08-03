@@ -54,9 +54,12 @@ jobs:
         run: python -m pip install --disable-pip-version-check ./clients/python
       - name: Python conformance tests
         run: python -m unittest discover -s clients/python/tests -v
+      - name: Build Rust lockstep server
+        run: cargo build -p ertw_server --bin ertw-lockstep
       - name: Rust interoperability and reconnect
         env:
           ERTW_RUN_RUST_INTEROP: "1"
+          ERTW_LOCKSTEP_BIN: ${{ github.workspace }}/target/debug/ertw-lockstep
         run: >-
           python -m unittest discover -s clients/python/tests
           -p test_rust_interop.py -v
