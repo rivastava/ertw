@@ -25,6 +25,19 @@ pub const CHUNK_SIZE: f32 = 32.0;
 /// Agents to maintain per chunk before streaming tops up.
 pub const AGENTS_PER_CHUNK: usize = 4;
 
+/// Deterministic agent placement used by the scaling benchmark.
+///
+/// Terrain coordinates are multiples of eight with at most 0.5 units of
+/// seeded jitter. This four-unit lattice stays at least 1.5 units away on each
+/// axis while also leaving four units between benchmark agents.
+#[doc(hidden)]
+pub fn collision_free_benchmark_position(index: usize) -> Vec2 {
+    Vec2::new(
+        2.0 + (index % 8) as f32 * 4.0,
+        2.0 + (index / 8) as f32 * 4.0,
+    )
+}
+
 /// Minimal placeholder agent used for genesis-seeded population. External testers
 /// replace these with real policies; the world only needs *an* agent object to
 /// route observations. It inherits the no-op (passive) behavior.
@@ -418,5 +431,61 @@ mod tests {
         let mut nodes = world.query_filtered::<Has<AgentMarker>, With<Physical>>();
         assert_eq!(nodes.iter(world).filter(|is_agent| !*is_agent).count(), 0);
         assert_eq!(world.resource::<ChunkManager>().active_chunks().count(), 9);
+    }
+
+    #[test]
+    fn benchmark_fixture_has_no_initial_collider_overlaps() {
+        const COLLIDER_DIAMETER: f32 = 1.0;
+        const SEEDS: [u64; 5] = [0xBEEF_BEEF, 1, 42, 0xDEAD_BEEF, 659_918];
+
+        let agents = (0..64)
+            .map(collision_free_benchmark_position)
+            .collect::<Vec<_>>();
+        for (index, first) in agents.iter().enumerate() {
+            for second in &agents[index + 1..] {
+                assert!(first.distance(*second) > COLLIDER_DIAMETER);
+            }
+        }
+
+        let active_chunks = (-1..=1).flat_map(|x| (-1..=1).map(move |y| (x, y)));
+        for seed in SEEDS {
+            let chunks = ChunkManager::new(seed);
+            let terrain = active_chunks
+                .clone()
+                .flat_map(|(x, y)| chunks.terrain_plan_for_chunk(x, y));
+            for node in terrain {
+                for agent in &agents {
+                    assert!(
+                        agent.distance(node.pos) > COLLIDER_DIAMETER,
+                        "seed {seed} placed terrain at {:?} over benchmark agent {:?}",
+                        node.pos,
+                        agent
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_benchmark_fixture_keeps_the_37th_agent_contact_free() {
+        let mut simulation = crate::ErtwWorld::new(42);
+        for index in 0..37 {
+            simulation.spawn_agent(
+                Box::new(GenesisAgent),
+                collision_free_benchmark_position(index),
+            );
+        }
+
+        simulation.step(2);
+
+        let world = simulation.app().world_mut();
+        assert_eq!(world.query::<&AgentMarker>().iter(world).count(), 37);
+        assert_eq!(world.query::<&Physical>().iter(world).count(), 82);
+        assert_eq!(
+            world
+                .resource::<avian2d::collision::CollisionDiagnostics>()
+                .contact_count,
+            0
+        );
     }
 }

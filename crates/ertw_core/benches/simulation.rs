@@ -1,8 +1,7 @@
 use avian2d::collision::CollisionDiagnostics;
 use avian2d::dynamics::solver::SolverDiagnostics;
-use bevy::math::Vec2;
 use ertw_core::components::{AgentMarker, Physical};
-use ertw_core::genesis::ChunkManager;
+use ertw_core::genesis::{collision_free_benchmark_position, ChunkManager};
 use ertw_core::ErtwWorld;
 use ertw_interface::{ActionTensor, Agent, ObservationTensor};
 use serde::Serialize;
@@ -86,9 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut simulation = ErtwWorld::new(seed);
     for index in 0..agents {
-        let x = (index % 8) as f32 * 2.0;
-        let y = (index / 8) as f32 * 2.0;
-        simulation.spawn_agent(Box::new(Passive), Vec2::new(x, y));
+        simulation.spawn_agent(Box::new(Passive), collision_free_benchmark_position(index));
     }
     if matches!(world_mode, WorldMode::AgentsOnly) {
         simulation
