@@ -22,8 +22,40 @@ from ertw_client.protocol import (
     encode_action,
     encode_json_frame,
     read_frame,
+    validate_extension,
+    validate_lifecycle,
     validate_metadata,
 )
+
+
+def valid_metadata():
+    return {
+        "protocol_version": 4,
+        "schema_version": 1,
+        "fixed_timestep_seconds": 1.0 / 60.0,
+        "physics_ticks_per_decision": 1,
+        "observation_floats": 47,
+        "action_floats": 7,
+        "self_stride": 8,
+        "neighbor_stride": 15,
+        "field_count": 3,
+        "max_neighbors": 2,
+        "field_samples": 1,
+        "field_channels": 3,
+        "sensor_radius": 8.0,
+        "action_min": [0.0] * 7,
+        "action_max": [1.0] * 7,
+        "action_semantics": ["continuous"] * 7,
+        "transport_mode": "lockstep",
+        "world_seed": 9,
+        "world_tick": 0,
+        "world_id": 10,
+        "session_id": 11,
+        "resume_token": "secret",
+        "stable_agent_id": 12,
+        "snapshot_schema_version": 2,
+        "capabilities": ["lockstep"],
+    }
 
 
 class ProtocolTests(unittest.TestCase):
@@ -136,30 +168,42 @@ class ProtocolTests(unittest.TestCase):
             encode_action(0, 0, Action(force_x=float("nan")))
 
     def test_metadata_dimensions_are_cross_checked(self):
-        metadata = {
-            "protocol_version": 4,
-            "action_floats": 7,
-            "self_stride": 8,
-            "neighbor_stride": 15,
-            "field_count": 3,
-            "transport_mode": "lockstep",
-            "max_neighbors": 2,
-            "field_samples": 1,
-            "field_channels": 3,
-            "observation_floats": 47,
-            "physics_ticks_per_decision": 1,
-            "session_id": 11,
-            "stable_agent_id": 12,
-            "resume_token": "secret",
-            "action_min": [0.0] * 7,
-            "action_max": [1.0] * 7,
-            "action_semantics": ["continuous"] * 7,
-            "capabilities": ["lockstep"],
-        }
+        metadata = valid_metadata()
         validate_metadata(metadata)
         metadata["observation_floats"] = 46
         with self.assertRaisesRegex(ProtocolError, "observation length"):
             validate_metadata(metadata)
+
+    def test_metadata_rejects_coerced_integer_fields(self):
+        metadata = valid_metadata()
+        metadata["max_neighbors"] = "2"
+        with self.assertRaisesRegex(ProtocolError, "must be an integer"):
+            validate_metadata(metadata)
+
+    def test_lifecycle_and_extension_payloads_are_validated(self):
+        lifecycle = {
+            "sequence": 1,
+            "world_tick": 2,
+            "kind": "session_attached",
+            "subject_id": 3,
+            "related_id": None,
+            "lineage_id": None,
+            "generation": None,
+            "reason": "connected",
+        }
+        validate_lifecycle(lifecycle)
+        lifecycle["sequence"] = 0
+        with self.assertRaisesRegex(ProtocolError, "out of range"):
+            validate_lifecycle(lifecycle)
+
+        validate_extension({"decision_sequence": 1, "delta": None})
+        with self.assertRaisesRegex(ProtocolError, "finite"):
+            validate_extension(
+                {
+                    "decision_sequence": 1,
+                    "delta": {"energy": float("nan"), "structure": 0.0, "mass": 0.0},
+                }
+            )
 
 
 if __name__ == "__main__":

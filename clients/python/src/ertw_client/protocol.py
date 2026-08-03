@@ -39,6 +39,16 @@ _JSON_KINDS = {
     FRAME_SNAPSHOT,
     FRAME_OBSERVATION_EXTENSION,
 }
+_ACTION_SEMANTICS = {"continuous", "level", "edge", "target"}
+_LIFECYCLE_KINDS = {
+    "entity_alive",
+    "entity_died",
+    "entity_reproduced",
+    "entity_replaced",
+    "world_terminated",
+    "session_attached",
+    "session_detached",
+}
 
 
 class ProtocolError(ValueError):
@@ -85,10 +95,27 @@ class FrameHeader:
         )
 
     def to_bytes(self) -> bytes:
+        if self.version != PROTOCOL_VERSION:
+            raise ProtocolError(f"unsupported protocol version {self.version}")
         if not 0 <= self.step < 1 << 64 or not 0 <= self.entity_id < 1 << 64:
             raise ProtocolError("step and entity ID must fit u64")
         if not HEADER_BYTES <= self.frame_bytes <= MAX_FRAME_BYTES:
             raise ProtocolError(f"invalid frame length {self.frame_bytes}")
+        words = {
+            "kind": self.kind,
+            "max_neighbors": self.max_neighbors,
+            "neighbor_count": self.neighbor_count,
+            "field_samples": self.field_samples,
+            "field_channels": self.field_channels,
+            "payload_floats": self.payload_floats,
+        }
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value < 1 << 32
+            for value in words.values()
+        ):
+            raise ProtocolError("header words must fit u32")
         return _HEADER.pack(
             WIRE_MAGIC,
             self.version,
@@ -279,16 +306,18 @@ def validate_metadata(metadata: Mapping[str, Any]) -> None:
     for key, value in expected.items():
         if metadata.get(key) != value:
             raise ProtocolError(f"incompatible metadata field {key}")
-    try:
-        max_neighbors = int(metadata["max_neighbors"])
-        field_samples = int(metadata["field_samples"])
-        field_channels = int(metadata["field_channels"])
-        observation_floats = int(metadata["observation_floats"])
-        physics_ticks = int(metadata["physics_ticks_per_decision"])
-        session_id = int(metadata["session_id"])
-        stable_agent_id = int(metadata["stable_agent_id"])
-    except (KeyError, TypeError, ValueError) as error:
-        raise ProtocolError("metadata is missing required integer fields") from error
+    max_neighbors = _metadata_int(metadata, "max_neighbors", 32)
+    field_samples = _metadata_int(metadata, "field_samples", 32)
+    field_channels = _metadata_int(metadata, "field_channels", 32)
+    observation_floats = _metadata_int(metadata, "observation_floats", 32)
+    physics_ticks = _metadata_int(metadata, "physics_ticks_per_decision", 32)
+    session_id = _metadata_int(metadata, "session_id", 128)
+    stable_agent_id = _metadata_int(metadata, "stable_agent_id", 64)
+    _metadata_int(metadata, "schema_version", 16, minimum=1)
+    _metadata_int(metadata, "snapshot_schema_version", 16, minimum=1)
+    _metadata_int(metadata, "world_seed", 64)
+    _metadata_int(metadata, "world_tick", 64)
+    _metadata_int(metadata, "world_id", 128)
     expected_observation = (
         SELF_STRIDE
         + FIELD_COUNT * field_samples * field_channels
@@ -298,19 +327,102 @@ def validate_metadata(metadata: Mapping[str, Any]) -> None:
         raise ProtocolError("metadata dimensions and tick hold must be positive")
     if observation_floats != expected_observation:
         raise ProtocolError("metadata observation length is inconsistent")
-    if not 0 <= session_id < 1 << 128 or not 0 <= stable_agent_id < 1 << 64:
-        raise ProtocolError("metadata identifiers are out of range")
     if not isinstance(metadata.get("resume_token"), str) or not metadata["resume_token"]:
         raise ProtocolError("metadata resume token is missing")
-    for key in ("action_min", "action_max", "action_semantics"):
-        value = metadata.get(key)
-        if not isinstance(value, list) or len(value) != ACTION_STRIDE:
-            raise ProtocolError(f"metadata field {key} must have {ACTION_STRIDE} entries")
+    fixed_timestep = metadata.get("fixed_timestep_seconds")
+    sensor_radius = metadata.get("sensor_radius")
+    if not _positive_finite(fixed_timestep) or not _positive_finite(sensor_radius):
+        raise ProtocolError("metadata timestep and sensor radius must be positive finite values")
+    action_min = _finite_number_list(metadata, "action_min", ACTION_STRIDE)
+    action_max = _finite_number_list(metadata, "action_max", ACTION_STRIDE)
+    if any(minimum > maximum for minimum, maximum in zip(action_min, action_max)):
+        raise ProtocolError("metadata action bounds are inverted")
+    semantics = metadata.get("action_semantics")
+    if (
+        not isinstance(semantics, list)
+        or len(semantics) != ACTION_STRIDE
+        or any(value not in _ACTION_SEMANTICS for value in semantics)
+    ):
+        raise ProtocolError("metadata action semantics are invalid")
     capabilities = metadata.get("capabilities")
     if not isinstance(capabilities, list) or not all(
         isinstance(capability, str) for capability in capabilities
     ):
         raise ProtocolError("metadata capabilities must be a string list")
+
+
+def _metadata_int(
+    metadata: Mapping[str, Any], key: str, bits: int, minimum: int = 0
+) -> int:
+    value = metadata.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProtocolError(f"metadata field {key} must be an integer")
+    if not minimum <= value < 1 << bits:
+        raise ProtocolError(f"metadata field {key} is out of range")
+    return value
+
+
+def _positive_finite(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _finite_number_list(
+    metadata: Mapping[str, Any], key: str, length: int
+) -> tuple[float, ...]:
+    values = metadata.get(key)
+    if not isinstance(values, list) or len(values) != length:
+        raise ProtocolError(f"metadata field {key} must have {length} entries")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        for value in values
+    ):
+        raise ProtocolError(f"metadata field {key} must contain finite numbers")
+    return tuple(float(value) for value in values)
+
+
+def validate_lifecycle(event: Mapping[str, Any]) -> None:
+    """Validate a lifecycle event before exposing it to agent code."""
+    _metadata_int(event, "sequence", 64, minimum=1)
+    _metadata_int(event, "world_tick", 64)
+    _metadata_int(event, "subject_id", 64)
+    if event.get("kind") not in _LIFECYCLE_KINDS:
+        raise ProtocolError("lifecycle kind is invalid")
+    related_id = event.get("related_id")
+    if related_id is not None:
+        _metadata_int(event, "related_id", 64)
+    reason = event.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        raise ProtocolError("lifecycle reason must be a string or null")
+    lineage_id = event.get("lineage_id")
+    if lineage_id is not None:
+        _metadata_int(event, "lineage_id", 64)
+    generation = event.get("generation")
+    if generation is not None:
+        _metadata_int(event, "generation", 32)
+
+
+def validate_extension(extension: Mapping[str, Any]) -> None:
+    """Validate optional decision metadata and physical deltas."""
+    _metadata_int(extension, "decision_sequence", 64, minimum=1)
+    delta = extension.get("delta")
+    if delta is None:
+        return
+    if not isinstance(delta, dict) or set(delta) != {"energy", "structure", "mass"}:
+        raise ProtocolError("physical delta has an invalid shape")
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        for value in delta.values()
+    ):
+        raise ProtocolError("physical delta must contain finite numbers")
 
 
 def decode_observation(frame: Frame) -> Observation:
@@ -363,18 +475,24 @@ class LockstepClient:
     """Stateful client for one ERTW lockstep session."""
 
     def __init__(self, stream: socket.socket, address: tuple[str, int]):
-        self._stream = stream
+        self._stream: socket.socket | None = stream
         self._address = address
         self.metadata: Mapping[str, Any] | None = None
         self.lifecycle: deque[Mapping[str, Any]] = deque()
+        self._pending_decision: Decision | None = None
 
     @classmethod
     def connect(
         cls, address: tuple[str, int], timeout: float | None = None
     ) -> LockstepClient:
-        client = cls(socket.create_connection(address, timeout), address)
-        client._receive_metadata()
-        return client
+        stream = socket.create_connection(address, timeout)
+        client = cls(stream, address)
+        try:
+            client._receive_metadata()
+            return client
+        except BaseException:
+            client.close()
+            raise
 
     @property
     def resume_credentials(self) -> ResumeCredentials:
@@ -387,49 +505,70 @@ class LockstepClient:
         )
 
     def next_decision(self) -> Decision:
+        if self._pending_decision is not None:
+            raise ProtocolError("send the pending action before requesting another decision")
         while True:
-            frame = read_frame(self._stream)
+            frame = read_frame(self._socket())
             if frame.header.kind == FRAME_LIFECYCLE:
-                self.lifecycle.append(decode_json(frame))
+                self._store_lifecycle(decode_json(frame))
                 continue
             if frame.header.kind == FRAME_METADATA:
-                self.metadata = decode_json(frame)
+                self._store_metadata(decode_json(frame))
                 continue
             if frame.header.kind != FRAME_OBSERVATION:
                 raise ProtocolError(f"unexpected frame kind {frame.header.kind}")
             observation = decode_observation(frame)
             extension = None
             if self._has_capability("physical_deltas"):
-                extension_frame = read_frame(self._stream)
+                extension_frame = read_frame(self._socket())
                 if extension_frame.header.kind != FRAME_OBSERVATION_EXTENSION:
                     raise ProtocolError("expected observation extension")
+                if extension_frame.header.step != observation.step:
+                    raise ProtocolError("observation extension step does not match observation")
                 extension = decode_json(extension_frame)
-            return Decision(observation, extension)
+                validate_extension(extension)
+            decision = Decision(observation, extension)
+            self._pending_decision = decision
+            return decision
 
     def send_action(self, decision: Decision, action: Action) -> None:
+        if decision != self._pending_decision:
+            raise ProtocolError("action does not correspond to the pending decision")
         observation = decision.observation
-        self._stream.sendall(encode_action(observation.step, observation.entity_id, action))
+        self._socket().sendall(
+            encode_action(observation.step, observation.entity_id, action)
+        )
+        self._pending_decision = None
 
     def reconnect(self, timeout: float | None = None) -> None:
         credentials = self.resume_credentials
-        self._stream.close()
+        self.close()
+        self._pending_decision = None
         stream = socket.create_connection(self._address, timeout)
-        stream.sendall(
-            encode_json_frame(
-                FRAME_RESUME,
-                0,
-                credentials.stable_agent_id,
-                {
-                    "session_id": credentials.session_id,
-                    "resume_token": credentials.resume_token,
-                },
-            )
-        )
         self._stream = stream
-        self._receive_metadata()
+        try:
+            stream.sendall(
+                encode_json_frame(
+                    FRAME_RESUME,
+                    0,
+                    credentials.stable_agent_id,
+                    {
+                        "session_id": credentials.session_id,
+                        "resume_token": credentials.resume_token,
+                    },
+                )
+            )
+            self._receive_metadata()
+            if self.resume_credentials != credentials:
+                raise ProtocolError("resumed session credentials changed")
+        except BaseException:
+            self.close()
+            raise
 
     def close(self) -> None:
-        self._stream.close()
+        if self._stream is not None:
+            self._stream.close()
+            self._stream = None
 
     def __enter__(self) -> LockstepClient:
         return self
@@ -439,16 +578,34 @@ class LockstepClient:
 
     def _receive_metadata(self) -> None:
         while True:
-            frame = read_frame(self._stream)
+            frame = read_frame(self._socket())
             if frame.header.kind == FRAME_METADATA:
-                metadata = decode_json(frame)
-                validate_metadata(metadata)
-                self.metadata = metadata
+                self._store_metadata(decode_json(frame))
                 return
             if frame.header.kind == FRAME_LIFECYCLE:
-                self.lifecycle.append(decode_json(frame))
+                self._store_lifecycle(decode_json(frame))
                 continue
             raise ProtocolError("metadata must precede observations")
+
+    def _socket(self) -> socket.socket:
+        if self._stream is None:
+            raise ProtocolError("client is disconnected")
+        return self._stream
+
+    def _store_metadata(self, metadata: Mapping[str, Any]) -> None:
+        validate_metadata(metadata)
+        if self.metadata is not None:
+            previous = dict(self.metadata)
+            current = dict(metadata)
+            previous.pop("world_tick", None)
+            current.pop("world_tick", None)
+            if current != previous:
+                raise ProtocolError("session metadata changed after negotiation")
+        self.metadata = metadata
+
+    def _store_lifecycle(self, event: Mapping[str, Any]) -> None:
+        validate_lifecycle(event)
+        self.lifecycle.append(event)
 
     def _has_capability(self, name: str) -> bool:
         if self.metadata is None:

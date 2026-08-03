@@ -11,6 +11,8 @@ from .protocol import (
     ProtocolError,
     ResumeCredentials,
     read_frame,
+    validate_extension,
+    validate_lifecycle,
     validate_metadata,
 )
 
@@ -25,5 +27,7 @@ __all__ = [
     "ProtocolError",
     "ResumeCredentials",
     "read_frame",
+    "validate_extension",
+    "validate_lifecycle",
     "validate_metadata",
 ]

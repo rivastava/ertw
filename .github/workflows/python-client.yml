@@ -1,0 +1,62 @@
+name: Python client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "clients/python/**"
+      - "crates/ertw_core/Cargo.toml"
+      - "crates/ertw_core/src/agents.rs"
+      - "crates/ertw_core/src/economy.rs"
+      - "crates/ertw_core/src/lib.rs"
+      - "crates/ertw_core/src/snapshot.rs"
+      - "crates/ertw_interface/**"
+      - "crates/ertw_server/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/python-client.yml"
+  pull_request:
+    paths:
+      - "clients/python/**"
+      - "crates/ertw_core/Cargo.toml"
+      - "crates/ertw_core/src/agents.rs"
+      - "crates/ertw_core/src/economy.rs"
+      - "crates/ertw_core/src/lib.rs"
+      - "crates/ertw_core/src/snapshot.rs"
+      - "crates/ertw_interface/**"
+      - "crates/ertw_server/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - ".github/workflows/python-client.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: clients/python/pyproject.toml
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Python client
+        run: python -m pip install --disable-pip-version-check ./clients/python
+      - name: Python conformance tests
+        run: python -m unittest discover -s clients/python/tests -v
+      - name: Rust interoperability and reconnect
+        env:
+          ERTW_RUN_RUST_INTEROP: "1"
+        run: >-
+          python -m unittest discover -s clients/python/tests
+          -p test_rust_interop.py -v
