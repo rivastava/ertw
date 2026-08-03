@@ -401,4 +401,22 @@ mod tests {
             "terrain survived outside active origins: {inert_origins:?}"
         );
     }
+
+    #[test]
+    fn preloaded_active_chunks_form_a_terrain_free_ablation() {
+        let mut simulation = crate::ErtwWorld::new(222);
+        simulation.spawn_agent(Box::new(GenesisAgent), Vec2::ZERO);
+        simulation
+            .app()
+            .world_mut()
+            .resource_mut::<ChunkManager>()
+            .restore_active_chunks((-1..=1).flat_map(|x| (-1..=1).map(move |y| (x, y))));
+
+        simulation.step(1);
+
+        let world = simulation.app().world_mut();
+        let mut nodes = world.query_filtered::<Has<AgentMarker>, With<Physical>>();
+        assert_eq!(nodes.iter(world).filter(|is_agent| !*is_agent).count(), 0);
+        assert_eq!(world.resource::<ChunkManager>().active_chunks().count(), 9);
+    }
 }
