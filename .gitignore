@@ -1,6 +1,14 @@
 # Rust build output
 /target/
 
+# Python client build and environment output
+__pycache__/
+*.py[cod]
+.venv/
+/clients/python/build/
+/clients/python/dist/
+/clients/python/*.egg-info/
+
 # Internal project material
 /AGENTS.md
 /docs/PLAN.md
